@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>課程報名管理後台</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body>
+<header class="topbar"><div class="wrap" id="topbar"><div class="brand">課程報名管理後台</div></div></header>
+<main class="wrap" id="view" aria-live="polite"></main>
+<div id="modal" hidden></div>
+<div id="toast" role="status" hidden></div>
+<script src="api.js"></script>
+<script>
+const A = { token: null, account: null, view: 'sessions', sid: null, sessions: [], pendingTotal: 0, modal: null, roster: null, q: '' };
+try { A.token = sessionStorage.getItem('adm-token'); A.account = sessionStorage.getItem('adm-account'); } catch (e) {}
+
+const STATE = { open: ['ok', '開放中'], full: ['bad', '已額滿'], deadline: ['warn', '已截止'], closed: ['neutral', '已關閉'] };
+const REG = { '正取': 'ok', '取消申請中': 'warn', '已取消': 'neutral' };
+const LOG_CLS = { '登入': 'neutral', '新增場次': 'ok', '編輯場次': 'neutral', '重新產生連結': 'warn', '取消申請': 'warn', '核准取消': 'bad', '取消報名': 'bad', '匯出名單': 'accent', '修改用餐': 'neutral', '寄信失敗': 'bad' };
+
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, 3200); }
+function view(html) { $('#view').innerHTML = html; }
+function loading() { view('<div class="empty">載入中…</div>'); }
+
+async function call(action, data) {
+  try { return await api(action, Object.assign({ token: A.token }, data || {})); }
+  catch (e) {
+    if (e.code === 'auth') { logoutLocal(e.message); throw Object.assign(new Error(e.message), { handled: true }); }
+    throw e;
+  }
+}
+function logoutLocal(msg) {
+  A.token = null; A.account = null;
+  try { sessionStorage.removeItem('adm-token'); sessionStorage.removeItem('adm-account'); } catch (e) {}
+  closeModal(); renderTop(); viewLogin(msg);
+}
+
+function renderTop() {
+  if (!A.token) { $('#topbar').innerHTML = '<div class="brand">課程報名管理後台</div>'; return; }
+  const cur = ['form', 'roster'].includes(A.view) ? 'sessions' : A.view;
+  const items = [['sessions', '場次管理', ''], ['pending', '待處理取消', A.pendingTotal ? `<span class="count">${A.pendingTotal}</span>` : ''], ['logs', '操作紀錄', '']];
+  $('#topbar').innerHTML = `<div class="brand">課程報名管理後台</div>
+    <nav class="subnav" aria-label="後台功能">${items.map(([k, t, b]) => `<button data-act="go" data-view="${k}" ${cur === k ? 'aria-current="page"' : ''}>${t}${b}</button>`).join('')}</nav>
+    <div class="who"><span>${esc(A.account)}</span><button class="btn sm" data-act="logout">登出</button></div>`;
+}
+
+async function go(v, sid) {
+  A.view = v; if (sid !== undefined) A.sid = sid;
+  renderTop();
+  try {
+    if (v === 'sessions') await viewSessions();
+    else if (v === 'form') await viewForm();
+    else if (v === 'roster') await viewRoster();
+    else if (v === 'pending') await viewPending();
+    else if (v === 'logs') await viewLogs();
+  } catch (e) { if (!e.handled) view(`<div class="notice bad">${esc(e.message)}</div>`); }
+  renderTop();
+}
+
+/* ----- 登入 ----- */
+function viewLogin(msg) {
+  view(`<form class="card login stack" id="login-form" novalidate>
+    <div><h1 style="font-size:22px">課程報名管理後台</h1><p class="muted small" style="margin:4px 0 0">僅限承辦人員使用</p></div>
+    <div class="notice bad" id="lg-err" ${msg ? '' : 'hidden'}>${esc(msg || '')}</div>
+    <label class="field" for="lg-user">帳號<input id="lg-user" autocomplete="username"></label>
+    <label class="field" for="lg-pass">密碼<input id="lg-pass" type="password" autocomplete="current-password"></label>
+    <button class="btn primary" type="submit">登入</button>
+    <p class="small muted" style="margin:0">連續輸錯 5 次將暫時鎖定 15 分鐘。忘記密碼請洽系統管理人重設。</p></form>`);
+}
+
+/* ----- 場次 ----- */
+async function loadSessions() { const r = await call('listSessions'); A.sessions = r.sessions; A.pendingTotal = r.pendingTotal; }
+async function viewSessions() {
+  loading(); await loadSessions();
+  const head = `<div class="row between" style="margin-bottom:16px"><h1 style="font-size:24px">場次管理</h1><button class="btn primary" data-act="new">＋ 新增場次</button></div>`;
+  if (!A.sessions.length) return view(head + `<div class="card empty"><strong style="color:var(--fg)">還沒有任何場次</strong><span>按「新增場次」建立第一場，系統會自動產生專屬報名連結。</span></div>`);
+  view(head + `<div class="table-box"><table style="min-width:1060px"><thead><tr><th>場次ID</th><th>課程／對象單位</th><th>日期時間</th><th>地點</th><th>報名截止</th><th>報名／名額</th><th>狀態</th><th>操作</th></tr></thead><tbody>${A.sessions.map((s) => {
+    const [c, t] = STATE[s.state]; const pct = Math.min(100, Math.round(s.active / s.cap * 100));
+    return `<tr><td class="num muted">${esc(s.sid)}</td><td><strong style="font-weight:500">${esc(s.title)}</strong><div class="small muted">${esc(s.org)}</div></td>
+      <td class="num" style="white-space:nowrap">${esc(fmtDay(s.date))}<div class="small muted">${esc(s.time)}</div></td><td>${esc(s.place)}</td>
+      <td class="num" style="white-space:nowrap">${fmt(s.deadline)}</td>
+      <td class="num">${s.active} / ${s.cap}${s.pending ? ` <span class="pill warn">申請中 ${s.pending}</span>` : ''}<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div></td>
+      <td><span class="pill ${c}">${t}</span></td>
+      <td><div class="row" style="gap:6px"><button class="btn sm" data-act="roster" data-sid="${esc(s.sid)}">名單</button><button class="btn sm" data-act="edit" data-sid="${esc(s.sid)}">編輯</button><button class="btn sm" data-act="copy" data-link="${esc(s.link)}">複製連結</button></div></td></tr>`;
+  }).join('')}</tbody></table></div>`);
+}
+async function viewForm() {
+  let s = null;
+  if (A.sid) { if (!A.sessions.find((x) => x.sid === A.sid)) await loadSessions(); s = A.sessions.find((x) => x.sid === A.sid); }
+  const v = s || { title: '', date: '', time: '', place: '', cap: '', deadline: '', org: '', desc: '', open: true, meal: false };
+  const side = s ? `<aside class="side">
+      <section class="card stack" style="gap:12px"><h2 style="font-size:17px">專屬報名連結</h2>
+        <label class="field" for="sf-link"><span class="hint">寄給機關窗口的網址</span><input id="sf-link" class="mono" readonly value="${esc(s.link)}"></label>
+        <div class="row"><button class="btn primary" type="button" data-act="copy" data-link="${esc(s.link)}">複製連結</button><a class="btn" href="${esc(s.link)}" target="_blank" rel="noopener" style="text-decoration:none">開啟預覽</a></div></section>
+      <section class="card stack" style="gap:10px"><h2 style="font-size:16px;color:var(--bad)">重新產生連結</h2>
+        <p class="small" style="margin:0">連結外流時使用。舊連結會立即失效，已報名資料不受影響，需要把新連結重新寄給機關窗口。</p>
+        <div><button class="btn outline-danger" type="button" data-act="regen" data-sid="${esc(s.sid)}">重新產生連結…</button></div></section>
+      <section class="stats"><div class="stat"><div class="k">已報名</div><div class="v">${s.active}</div></div><div class="stat"><div class="k">剩餘</div><div class="v">${Math.max(0, s.cap - s.active)}</div></div></section>
+    </aside>` : '';
+  view(`<p class="crumb"><button class="link-btn" data-act="go" data-view="sessions">場次管理</button> ／ ${s ? '編輯場次 ' + esc(s.sid) : '新增場次'}</p>
+  <h1 style="font-size:24px;margin-bottom:16px">${s ? '編輯場次' : '新增場次'}</h1>
+  <div class="split"><form class="card stack main" id="session-form" novalidate>
+    <div class="notice bad" id="sf-err" hidden></div>
+    <div class="grid-form">
+      <label class="field span-all" for="sf-title"><span>課程名稱 <span class="req">*</span></span><input id="sf-title" value="${esc(v.title)}"></label>
+      <label class="field" for="sf-date"><span>上課日期 <span class="req">*</span></span><input id="sf-date" type="date" value="${esc(v.date)}"></label>
+      <label class="field" for="sf-time"><span>時間 <span class="req">*</span></span><input id="sf-time" value="${esc(v.time)}" placeholder="09:30–16:30"></label>
+      <label class="field span-all" for="sf-place"><span>地點 <span class="req">*</span></span><input id="sf-place" value="${esc(v.place)}"></label>
+      <label class="field" for="sf-cap"><span>名額 <span class="req">*</span></span><input id="sf-cap" type="number" min="1" step="1" value="${esc(v.cap)}">${s ? `<span class="hint">目前有效報名 ${s.active} 人，名額不可低於此數</span>` : ''}</label>
+      <label class="field" for="sf-deadline"><span>報名截止 <span class="req">*</span></span><input id="sf-deadline" type="datetime-local" value="${esc(v.deadline)}"><span class="hint">截止後不能報名，也不能線上申請取消</span></label>
+      <label class="field span-all" for="sf-org"><span>對象單位 <span class="req">*</span></span><input id="sf-org" value="${esc(v.org)}"><span class="hint">會預先帶入報名表的「服務單位」，報名者可修改</span></label>
+      <label class="field span-all" for="sf-desc">場次說明（顯示在報名頁，選填）<textarea id="sf-desc" rows="3">${esc(v.desc)}</textarea></label>
+    </div>
+    <label class="check card" style="padding:12px 14px" for="sf-meal"><input type="checkbox" id="sf-meal" ${v.meal ? 'checked' : ''}><span><strong style="font-weight:500">提供餐點</strong>　<span class="muted">勾選後報名頁會出現「用餐：葷食／素食」必填欄位</span></span></label>
+    <label class="check card" style="padding:12px 14px" for="sf-open"><input type="checkbox" id="sf-open" ${v.open ? 'checked' : ''}><span><strong style="font-weight:500">開放報名</strong>　<span class="muted">取消勾選即關閉報名</span></span></label>
+    <div class="row" style="justify-content:flex-end"><button class="btn" type="button" data-act="go" data-view="sessions">返回</button><button class="btn primary" type="submit">${s ? '儲存' : '建立場次'}</button></div>
+  </form>${side}</div>`);
+}
+
+/* ----- 名單 ----- */
+async function viewRoster() {
+  loading();
+  const r = await call('roster', { sid: A.sid, q: A.q });
+  A.roster = r;
+  const s = r.session, st = r.stats;
+  const rows = r.regs.map((g, i) => {
+    let act = '';
+    if (g.status === '正取') act = `<button class="btn sm outline-danger" data-act="admin-cancel" data-reg="${esc(g.regId)}">取消報名</button>`;
+    if (g.status === '取消申請中') act = `<button class="btn sm danger" data-act="approve" data-reg="${esc(g.regId)}">處理申請</button>`;
+    if (g.status === '已取消') act = `<span class="small muted">${fmt(g.cancelledAt)} 由 ${esc(g.cancelledBy)}</span>`;
+    if (s.meal && g.status !== '已取消') act += `<button class="btn sm" data-act="meal" data-reg="${esc(g.regId)}">修改用餐</button>`;
+    return `<tr class="${g.status === '已取消' ? 'dim' : ''}" data-status="${esc(g.status)}"><td class="num">${i + 1}</td><td class="num" style="white-space:nowrap">${fmt(g.at)}</td><td class="mono">${esc(g.regId)}</td>
+      <td style="font-weight:500;white-space:nowrap">${esc(g.name)}</td><td class="mono" style="white-space:nowrap">${esc(g.nidMasked)}</td><td style="min-width:160px">${esc(g.org)}</td><td style="white-space:nowrap">${esc(g.email)}</td><td style="white-space:nowrap">${esc(g.phone)}</td>
+      ${s.meal ? `<td>${g.meal ? `<span class="pill ${g.meal === '素食' ? 'ok' : 'neutral'}">${esc(g.meal)}</span>` : '<span class="muted">未填</span>'}</td>` : ''}
+      <td><span class="pill ${REG[g.status] || 'neutral'}">${esc(g.status)}</span></td><td><div class="row" style="gap:6px;flex-wrap:nowrap">${act}</div></td></tr>`;
+  }).join('');
+  view(`<p class="crumb"><button class="link-btn" data-act="go" data-view="sessions">場次管理</button> ／ 報名名單</p>
+  <div class="stack">
+    <div class="row between" style="align-items:flex-end"><div><h1 style="font-size:24px">${esc(s.title)} <span class="muted" style="font-size:16px;font-weight:400">${esc(s.sid)}</span></h1>
+      <p class="muted" style="margin:4px 0 0">${esc(fmtDay(s.date))} ${esc(s.time)}｜${esc(s.place)}｜對象：${esc(s.org)}</p></div>
+      <button class="btn primary" data-act="export" data-sid="${esc(s.sid)}" ${st.active ? '' : 'disabled'}>匯出名單（Excel）</button></div>
+    ${st.pending ? `<div class="notice warn row between"><span>此場次有 <strong>${st.pending} 筆取消申請</strong>待處理。現在匯出，這些人仍會列入名單，並在備註欄標註「取消申請中」。</span><button class="btn sm" data-act="go" data-view="pending">前往處理</button></div>` : ''}
+    <div class="stats">
+      <div class="stat"><div class="k">名額</div><div class="v">${s.cap}</div></div>
+      <div class="stat"><div class="k">有效報名（含申請中）</div><div class="v">${st.active}</div></div>
+      <div class="stat"><div class="k">取消申請中</div><div class="v" style="color:var(--warn)">${st.pending}</div></div>
+      <div class="stat"><div class="k">已取消</div><div class="v">${st.cancelled}</div></div>
+      <div class="stat"><div class="k">剩餘名額</div><div class="v" style="color:var(--ok)">${Math.max(0, s.cap - st.active)}</div></div>
+      ${s.meal ? `<div class="stat"><div class="k">用餐（有效報名）</div><div class="v" style="font-size:18px;padding-top:4px">葷 ${st.meat}／素 ${st.veg}</div></div>` : ''}
+    </div>
+    <form class="row" id="search-form" style="align-items:flex-end" novalidate>
+      <label class="field" for="rs-q" style="flex:1 1 260px">搜尋<input id="rs-q" type="search" value="${esc(A.q)}" placeholder="姓名、完整身分證字號、Email、報名編號、單位"></label>
+      <button class="btn" type="submit">搜尋</button>
+      <label class="field" for="rs-st">狀態<select id="rs-st"><option value="">全部</option><option>正取</option><option>取消申請中</option><option>已取消</option></select></label>
+    </form>
+    ${r.regs.length ? `<div class="table-box"><table style="min-width:1240px"><thead><tr><th>#</th><th>報名時間</th><th>報名編號</th><th>姓名</th><th>身分證字號</th><th>服務單位</th><th>Email</th><th>電話</th>${s.meal ? '<th>用餐</th>' : ''}<th>狀態</th><th>操作</th></tr></thead><tbody id="roster-body">${rows}</tbody></table></div>`
+      : `<div class="card empty">${A.q ? '沒有符合搜尋條件的報名。' : '還沒有人報名。'}</div>`}
+    <p class="small muted" style="margin:0">畫面上的身分證字號已遮罩，搜尋可輸入完整號碼。匯出的 Excel 含完整身分證字號，包含正取與取消申請中（備註欄標示），不含已取消。</p>
+  </div>`);
+}
+
+/* ----- 待處理、紀錄 ----- */
+async function viewPending() {
+  loading();
+  const r = await call('pending');
+  A.pendingTotal = r.list.length; A.pendingList = r.list;
+  const head = `<h1 style="font-size:24px">待處理取消申請</h1><p class="muted" style="margin:4px 0 16px">報名者透過確認信連結送出的申請。核准後名額才釋出，並寄「取消已完成」通知信。本系統不提供退回；不能同意時請直接聯繫報名者。</p>`;
+  if (!r.list.length) return view(head + '<div class="card empty">目前沒有待處理的取消申請。</div>');
+  view(head + `<div class="table-box"><table style="min-width:980px"><thead><tr><th>申請時間</th><th>場次</th><th>報名編號</th><th>姓名</th><th>服務單位</th><th>申請原因</th><th>操作</th></tr></thead><tbody>${r.list.map((g) => `<tr>
+    <td class="num" style="white-space:nowrap">${fmt(g.reqAt)}</td><td><strong style="font-weight:500">${esc(g.sid)} ${esc(g.title)}</strong><div class="small muted">${esc(g.date.replace(/-/g, '/'))}｜截止 ${fmt(g.deadline)}</div></td>
+    <td class="mono">${esc(g.regId)}</td><td style="font-weight:500">${esc(g.name)}</td><td>${esc(g.org)}</td><td>${esc(g.reqReason || '（未填寫）')}</td>
+    <td><button class="btn sm danger" data-act="approve" data-reg="${esc(g.regId)}">核准取消</button></td></tr>`).join('')}</tbody></table></div>`);
+}
+async function viewLogs() {
+  loading();
+  const r = await call('logs');
+  const head = '<h1 style="font-size:24px">操作紀錄</h1><p class="muted" style="margin:4px 0 16px">最近 500 筆，只能查看，無法修改。完整紀錄在試算表「操作紀錄」工作表。</p>';
+  if (!r.logs.length) return view(head + '<div class="card empty">目前沒有紀錄。</div>');
+  view(head + `<div class="table-box"><table style="min-width:820px"><thead><tr><th>時間</th><th>帳號</th><th>動作</th><th>對象</th><th>內容</th></tr></thead><tbody>${r.logs.map((l) => `<tr><td class="num" style="white-space:nowrap">${fmt(l.at)}</td><td>${esc(l.user)}</td><td><span class="pill ${LOG_CLS[l.action] || 'neutral'}">${esc(l.action)}</span></td><td class="mono" style="white-space:nowrap">${esc(l.target)}</td><td class="muted">${esc(l.detail)}</td></tr>`).join('')}</tbody></table></div>`);
+}
+
+/* ----- 視窗 ----- */
+function openModal(m) {
+  A.modal = m;
+  const el = $('#modal');
+  el.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="mt"><h2 id="mt" style="font-size:20px">${esc(m.title)}</h2>${m.body}
+    <div class="notice bad" id="modal-err" hidden></div>
+    <div class="modal-actions"><button class="btn" data-act="modal-close">${esc(m.cancelLabel || '返回')}</button>${m.alt ? `<button class="btn" data-act="modal-alt">${esc(m.alt.label)}</button>` : ''}<button class="btn ${m.danger ? 'danger' : 'primary'}" data-act="modal-ok">${esc(m.okLabel)}</button></div></div>`;
+  el.hidden = false;
+  el.querySelector('[data-act="modal-ok"]').focus();
+}
+function closeModal() { A.modal = null; const el = $('#modal'); el.hidden = true; el.innerHTML = ''; }
+function findReg(id) { return (A.roster && A.roster.regs.find((g) => g.regId === id)) || (A.pendingList || []).find((g) => g.regId === id); }
+function regInfo(g) { return `<dl class="kv notice info"><dt>姓名</dt><dd>${esc(g.name)}</dd><dt>報名編號</dt><dd class="mono">${esc(g.regId)}</dd><dt>服務單位</dt><dd>${esc(g.org)}</dd>${g.reqAt ? `<dt>申請時間</dt><dd>${fmt(g.reqAt)}</dd><dt>申請原因</dt><dd>${esc(g.reqReason || '（未填寫）')}</dd>` : ''}</dl>`; }
+
+function openApprove(id) {
+  const g = findReg(id);
+  openModal({ title: '處理取消申請', okLabel: '核准取消', danger: true, cancelLabel: '稍後處理',
+    body: `${regInfo(g)}<label class="field" for="ap-note">承辦人備註（選填，不會寄給報名者）<textarea id="ap-note" rows="2"></textarea></label>
+      <div class="notice warn">核准後名額立即釋出，並寄「取消已完成」通知信給報名者。</div>`,
+    onOk: async () => { await call('approve', { regId: id, note: $('#ap-note').value.trim() }); toast('已核准取消'); } });
+}
+function openAdminCancel(id) {
+  const g = findReg(id);
+  openModal({ title: '取消報名', okLabel: '確認取消報名', danger: true,
+    body: `${regInfo(g)}<label class="field" for="cm-reason"><span>取消原因 <span class="req">*</span></span><select id="cm-reason"><option>本人來電／來信取消</option><option>機關窗口通知取消</option><option>重複報名</option><option>其他</option></select></label>
+      <label class="field" for="cm-note">補充說明（選填）<textarea id="cm-note" rows="2"></textarea></label>
+      <div class="notice warn">承辦人直接取消，不需要報名者申請。名額立即釋出，並寄「取消已完成」通知信。</div>`,
+    onOk: async () => { await call('adminCancel', { regId: id, reason: $('#cm-reason').value, note: $('#cm-note').value.trim() }); toast('已取消報名'); } });
+}
+function openMeal(id) {
+  const g = findReg(id);
+  const opt = (v, k) => `<label class="radio" for="${k}"><input type="radio" name="em" id="${k}" value="${v}" ${g.meal === v ? 'checked' : ''}>${v}</label>`;
+  openModal({ title: '修改用餐', okLabel: '儲存',
+    body: `<p style="margin:0">${esc(g.name)}（${esc(g.regId)}）目前：<strong>${esc(g.meal || '未填')}</strong></p>
+      <fieldset class="field meal"><legend>改為</legend><div class="radios">${opt('葷食', 'em-m')}${opt('素食', 'em-v')}</div></fieldset>
+      <p class="small muted" style="margin:0">修改會記錄在操作紀錄，不會寄信通知報名者。</p>`,
+    onOk: async () => { const el = document.querySelector('input[name="em"]:checked'); if (!el) throw new Error('請選擇葷食或素食。'); await call('editMeal', { regId: id, meal: el.value }); toast('已修改用餐'); } });
+}
+function openRegen(sid) {
+  openModal({ title: '重新產生連結', okLabel: '重新產生', danger: true,
+    body: `<p style="margin:0">${esc(sid)} 的舊連結會立即失效。已報名的資料不受影響，但需要把新連結重新寄給機關窗口。</p>`,
+    onOk: async () => { await call('regenCode', { sid: sid }); await loadSessions(); toast('已產生新連結'); } });
+}
+async function doExport(sid) {
+  if (!window.XLSX) return toast('Excel 元件載入失敗，請重新整理頁面再試。');
+  const r = await call('exportRows', { sid: sid });
+  const head = ['序號', '姓名', '身分證字號', '服務單位', 'Email', '電話'].concat(r.meal ? ['用餐'] : [], ['備註']);
+  const aoa = [head].concat(r.rows.map((x, i) => [i + 1, x.name, x.nid, x.org, x.email, x.phone].concat(r.meal ? [x.meal] : [], [x.note])));
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 6 }, { wch: 12 }, { wch: 14 }, { wch: 28 }, { wch: 30 }, { wch: 16 }].concat(r.meal ? [{ wch: 8 }] : [], [{ wch: 14 }]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sid);
+  XLSX.writeFile(wb, `${sid}_${r.title}_報名名單.xlsx`);
+  toast('已匯出名單');
+}
+function onExport(sid) {
+  const pend = A.roster ? A.roster.stats.pending : 0;
+  if (!pend) return doExport(sid).catch((e) => { if (!e.handled) toast(e.message); });
+  openModal({ title: '還有取消申請待處理', okLabel: '仍要匯出',
+    body: `<p style="margin:0">此場次還有 ${pend} 筆取消申請沒處理。現在匯出，這些人會列入名單，並在備註欄標註「取消申請中」。</p>`,
+    alt: { label: '先去處理', run: () => go('pending') },
+    onOk: async () => { await doExport(sid); }, noReload: true });
+}
+
+/* ----- 事件 ----- */
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-act]');
+  if (!b || b.disabled) return;
+  const act = b.dataset.act;
+  try {
+    if (act === 'go') { A.q = ''; go(b.dataset.view); }
+    else if (act === 'logout') { try { await api('logout', { token: A.token }); } catch (x) {} logoutLocal(); }
+    else if (act === 'new') go('form', null);
+    else if (act === 'edit') go('form', b.dataset.sid);
+    else if (act === 'roster') { A.q = ''; go('roster', b.dataset.sid); }
+    else if (act === 'copy') {
+      try { await navigator.clipboard.writeText(b.dataset.link); toast('已複製連結'); }
+      catch (x) { const i = $('#sf-link'); if (i) { i.focus(); i.select(); } toast('無法自動複製，請手動複製：' + b.dataset.link); }
+    }
+    else if (act === 'regen') openRegen(b.dataset.sid);
+    else if (act === 'approve') openApprove(b.dataset.reg);
+    else if (act === 'admin-cancel') openAdminCancel(b.dataset.reg);
+    else if (act === 'meal') openMeal(b.dataset.reg);
+    else if (act === 'export') onExport(b.dataset.sid);
+    else if (act === 'modal-close') closeModal();
+    else if (act === 'modal-alt') { const m = A.modal; closeModal(); m.alt.run(); }
+    else if (act === 'modal-ok') {
+      const m = A.modal; b.disabled = true;
+      try { await m.onOk(); closeModal(); if (!m.noReload) go(A.view); }
+      catch (err) { if (err.handled) return; b.disabled = false; const el = $('#modal-err'); el.textContent = err.message; el.hidden = false; }
+    }
+  } catch (err) { if (!err.handled) toast(err.message); }
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && A.modal) closeModal(); });
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'rs-st') { const v = e.target.value; document.querySelectorAll('#roster-body tr').forEach((tr) => { tr.hidden = !!v && tr.dataset.status !== v; }); }
+});
+document.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target, btn = f.querySelector('[type="submit"]');
+  if (f.id === 'search-form') { A.q = $('#rs-q').value.trim(); return go('roster'); }
+  if (btn) btn.disabled = true;
+  try {
+    if (f.id === 'login-form') {
+      const r = await api('login', { account: $('#lg-user').value.trim(), password: $('#lg-pass').value });
+      A.token = r.token; A.account = r.account;
+      try { sessionStorage.setItem('adm-token', r.token); sessionStorage.setItem('adm-account', r.account); } catch (x) {}
+      return go('sessions');
+    }
+    if (f.id === 'session-form') {
+      const data = { title: $('#sf-title').value.trim(), date: $('#sf-date').value, time: $('#sf-time').value.trim(), place: $('#sf-place').value.trim(),
+        cap: $('#sf-cap').value, deadline: $('#sf-deadline').value, org: $('#sf-org').value.trim(), desc: $('#sf-desc').value.trim(),
+        open: $('#sf-open').checked, meal: $('#sf-meal').checked };
+      const r = await call('saveSession', { sid: A.sid, data: data });
+      toast(A.sid ? '已儲存' : '已建立場次，專屬連結已產生');
+      await loadSessions();
+      return go('form', r.sid);
+    }
+  } catch (err) {
+    if (err.handled) return;
+    const el = f.id === 'login-form' ? $('#lg-err') : $('#sf-err');
+    if (el) showErr(el, err.message); else toast(err.message);
+  } finally { if (btn && document.body.contains(btn)) btn.disabled = false; }
+});
+
+if (A.token) go('sessions'); else viewLogin();
+</script>
+</body>
+</html>

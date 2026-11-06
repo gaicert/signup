@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>申請取消報名｜公務AI認證服務中心</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="page" id="app" aria-live="polite"><div class="empty">載入中…</div></main>
+<script src="api.js"></script>
+<script>
+const token = new URLSearchParams(location.search).get('t') || '';
+function render(html) { $('#app').innerHTML = html; }
+
+async function load() {
+  if (!token) return render(stateCard('neutral', '連結無效', '找不到此取消連結', `連結可能輸入錯誤或已失效，${ASK}。`));
+  try {
+    const r = await api('cancelInfo', { token: token });
+    if (r.state === 'notfound') return render(stateCard('neutral', '連結無效', '找不到此取消連結', `連結可能輸入錯誤或已失效，${ASK}。`));
+    const s = r.session, g = r.reg;
+    if (r.state === 'cancelled') return render(stateCard('neutral', '已取消', '此筆報名已取消', `報名編號 ${g.regId} 已於 ${fmt(g.cancelledAt)} 完成取消。如需再次報名，${ASK}。`));
+    if (r.state === 'pending') return render(stateCard('warn', '取消申請中', '您的取消申請處理中', `已於 ${fmt(g.reqAt)} 送出申請，請等候承辦人確認，不需要重複申請。`));
+    if (r.state === 'deadline') return render(stateCard('bad', '已超過線上取消期限', '無法線上申請取消', `線上取消申請已於 ${fmt(s.deadline)} 截止。如需取消，${ASK}。`));
+    render(`<h1 style="font-size:26px">申請取消報名</h1>
+      <section class="card"><dl class="kv"><dt>報名編號</dt><dd class="mono">${esc(g.regId)}</dd><dt>姓名</dt><dd>${esc(g.name)}</dd><dt>課程</dt><dd>${esc(s.title)}</dd><dt>日期時間</dt><dd>${esc(fmtDay(s.date))} ${esc(s.time)}</dd><dt>地點</dt><dd>${esc(s.place)}</dd></dl></section>
+      <form class="stack" id="cancel-form" novalidate>
+        <div class="notice bad" id="err" hidden></div>
+        <section class="card stack" style="gap:12px">
+          <label class="field" for="f-reason">取消原因（選填）<textarea id="f-reason" rows="3" maxlength="200" placeholder="例如：當天公務無法出席"></textarea></label>
+          <div class="notice warn">送出後由承辦人確認，確認前您的名額仍會保留。完成取消後會寄「取消已完成」通知信。線上申請期限：${fmt(s.deadline)}。</div>
+        </section>
+        <button class="btn danger submit" type="submit">送出取消申請</button>
+      </form>
+      <p class="foot">${CONTACT_HTML}</p>`);
+  } catch (e) {
+    render(stateCard('bad', '暫時無法載入', '頁面載入失敗', e.message + ' 請稍後重新整理頁面。'));
+  }
+}
+
+document.addEventListener('submit', async (e) => {
+  if (e.target.id !== 'cancel-form') return;
+  e.preventDefault();
+  const btn = e.target.querySelector('[type="submit"]');
+  btn.disabled = true; btn.textContent = '送出中…';
+  try {
+    await api('cancelApply', { token: token, reason: $('#f-reason').value.trim() });
+    render(stateCard('accent', '已送出申請', '已收到您的取消申請', '承辦人確認後會寄「取消已完成」通知信給您。在此之前，您的名額仍然保留。'));
+  } catch (ex) {
+    showErr($('#err'), ex.message);
+    btn.disabled = false; btn.textContent = '送出取消申請';
+  }
+});
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>課程報名｜公務AI認證服務中心</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="page" id="app" aria-live="polite"><div class="empty">載入中…</div></main>
+<script src="api.js"></script>
+<script>
+const code = new URLSearchParams(location.search).get('s') || '';
+let session = null;
+
+function render(html) { $('#app').innerHTML = html; }
+
+function sessionInfo(s) {
+  return `<section class="card stack" style="gap:12px"><dl class="kv"><dt>日期</dt><dd>${esc(fmtDay(s.date))}</dd><dt>時間</dt><dd>${esc(s.time)}</dd><dt>地點</dt><dd>${esc(s.place)}</dd></dl>
+    ${s.desc ? `<div class="notice info" style="white-space:pre-line">${esc(s.desc)}</div>` : ''}</section>`;
+}
+
+function formHtml(s, remaining) {
+  return `<div><p class="small muted" style="margin:0 0 2px">${esc(s.org)} 專班</p>
+      <div class="row between"><h1 style="font-size:26px">${esc(s.title)}</h1><span class="pill ok">剩 ${remaining} 名</span></div></div>
+    ${sessionInfo(s)}
+    <form class="stack" id="reg-form" novalidate>
+      <div class="notice bad" id="err" hidden></div>
+      <section class="card stack" style="gap:14px"><h2 style="font-size:17px">填寫資料</h2>
+        <div class="grid-form">
+          <label class="field" for="f-name"><span>姓名 <span class="req">*</span></span><input id="f-name" autocomplete="name" maxlength="50"></label>
+          <label class="field" for="f-nid"><span>身分證字號 <span class="req">*</span></span><input id="f-nid" class="mono" maxlength="10" autocapitalize="characters" autocomplete="off" spellcheck="false"><span class="hint">因合格證書將匯入人事行政總處 WebHR，故須填寫</span></label>
+          <label class="field" for="f-email"><span>Email <span class="req">*</span></span><input id="f-email" type="email" autocomplete="email" maxlength="100"></label>
+          <label class="field" for="f-phone"><span>聯絡電話 <span class="req">*</span></span><input id="f-phone" type="tel" autocomplete="tel" maxlength="30"></label>
+          <label class="field span-all" for="f-org"><span>服務單位 <span class="req">*</span></span><input id="f-org" value="${esc(s.org)}" maxlength="100"><span class="hint">已預先帶入，如有科室或處室請自行補充修改</span></label>
+          ${s.meal ? `<fieldset class="field span-all meal"><legend>用餐 <span class="req">*</span></legend>
+            <div class="radios"><label class="radio" for="f-meal-m"><input type="radio" name="f-meal" id="f-meal-m" value="葷食">葷食</label><label class="radio" for="f-meal-v"><input type="radio" name="f-meal" id="f-meal-v" value="素食">素食</label></div></fieldset>` : ''}
+        </div>
+        <div class="hp" aria-hidden="true"><input id="f-website" tabindex="-1" autocomplete="off"></div>
+      </section>
+      <section class="card stack" style="gap:12px"><h2 style="font-size:17px">個人資料蒐集告知</h2>
+        <div class="notice info small">本單位（財團法人中華民國電腦技能基金會）為辦理課程報名、聯繫、統計及合格證書匯入人事行政總處 WebHR 之目的，蒐集您的姓名、身分證字號、Email、電話與服務單位。資料僅於本課程相關作業期間內，以電子方式於本單位內部利用，除依前述目的提供人事行政總處外，不會提供予其他第三方。您可依個人資料保護法第 3 條規定，向本單位請求查詢、閱覽、更正或刪除您的個人資料。若您不提供必填資料，將無法完成報名。</div>
+        <label class="check" for="f-agree"><input type="checkbox" id="f-agree"><span>我已閱讀並同意上述個人資料蒐集告知</span></label>
+      </section>
+      <button class="btn primary submit" type="submit">送出報名</button>
+    </form>
+    <p class="foot">${CONTACT_HTML}</p>`;
+}
+
+async function load() {
+  if (!code) return render(stateCard('accent', '課程報名', '請使用專屬報名連結', '本系統僅受理專屬連結報名，請使用承辦人提供給貴單位的報名連結。'));
+  try {
+    const r = await api('session', { code: code });
+    if (r.state === 'notfound') return render(stateCard('neutral', '連結無效', '找不到此報名連結', `連結可能輸入錯誤或已失效，${ASK}。`));
+    session = r.session;
+    document.title = session.title + '｜課程報名';
+    if (r.state === 'closed') return render(stateCard('warn', '報名已截止', session.title, '本場次目前未開放報名。'));
+    if (r.state === 'deadline') return render(stateCard('warn', '報名已截止', session.title, `本場次已於 ${fmt(session.deadline)} 截止報名。`));
+    if (r.state === 'full') return render(stateCard('bad', '已額滿', session.title, `${session.date.replace(/-/g, '/')} 場次名額已滿，暫停受理報名。如有需要，${ASK}。`));
+    render(formHtml(session, r.remaining));
+  } catch (e) {
+    render(stateCard('bad', '暫時無法載入', '頁面載入失敗', e.message + ' 請稍後重新整理頁面。'));
+  }
+}
+
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'f-nid') { const t = e.target, p = t.selectionStart; t.value = t.value.toUpperCase(); try { t.setSelectionRange(p, p); } catch (x) {} }
+});
+
+document.addEventListener('submit', async (e) => {
+  if (e.target.id !== 'reg-form') return;
+  e.preventDefault();
+  const err = $('#err'); err.hidden = true;
+  const mealEl = document.querySelector('input[name="f-meal"]:checked');
+  const d = {
+    code: code, name: $('#f-name').value.trim(), nid: $('#f-nid').value.trim().toUpperCase(), email: $('#f-email').value.trim(),
+    phone: $('#f-phone').value.trim(), org: $('#f-org').value.trim(), meal: mealEl ? mealEl.value : '',
+    agree: $('#f-agree').checked, website: $('#f-website').value
+  };
+  const errs = [];
+  if (!d.name || !d.nid || !d.email || !d.phone || !d.org) errs.push('請填寫所有必填欄位。');
+  if (session.meal && !d.meal) errs.push('請選擇用餐（葷食或素食）。');
+  if (d.nid && !validNid(d.nid)) errs.push('身分證字號格式不正確，請確認。');
+  if (d.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) errs.push('Email 格式不正確。');
+  if (!d.agree) errs.push('請勾選同意個人資料蒐集告知。');
+  if (errs.length) return showErr(err, errs.join('\n'));
+
+  const btn = e.target.querySelector('[type="submit"]');
+  btn.disabled = true; btn.textContent = '送出中…';
+  try {
+    const r = await api('register', d);
+    render(`<section class="card state"><span class="pill ok">報名成功</span><h1 class="state-title">報名成功</h1>
+        <p class="muted" style="margin:0">確認信已寄至 ${esc(r.email)}，請留意收件匣或垃圾郵件。</p>
+        <p style="margin:6px 0 0">報名編號 <strong class="mono">${esc(r.regId)}</strong></p></section>
+      ${sessionInfo(r.session)}
+      ${r.meal ? `<p class="foot">用餐：${esc(r.meal)}</p>` : ''}
+      <p class="foot">如需取消，請使用確認信中的「申請取消報名」連結（${fmt(r.session.deadline)} 前）。<br>${CONTACT_HTML}</p>`);
+    window.scrollTo(0, 0);
+  } catch (ex) {
+    showErr(err, ex.message);
+    btn.disabled = false; btn.textContent = '送出報名';
+  }
+});
+
+load();
+</script>
+</body>
+</html>
