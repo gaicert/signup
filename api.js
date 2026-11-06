@@ -1,6 +1,6 @@
 // ===== 設定（★ 部署前請修改）=====
 // Apps Script 部署後取得的網頁應用程式網址（結尾是 /exec）
-const API_URL = 'https://script.google.com/macros/s/請貼上部署網址/exec';
+const API_URL = 'https://script.google.com/macros/s/AKfycbxD7n5yNyn7T2Y8-ALHUMFQx_ZVrWkLNLRU3DPULSvp4KXmrmceeEm-E5-ekLmTA4sH/exec';
 
 const CENTER_NAME = '公務AI共通核心能力認證服務中心';
 const CENTER_URL = 'https://gaic.csf.org.tw/gaic';
